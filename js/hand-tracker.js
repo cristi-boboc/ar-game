@@ -1,8 +1,8 @@
 /**
- * HandTracker - Manages MediaPipe Hands detection and clap gesture recognition.
+ * HandTracker - Manages MediaPipe Hands detection and squeeze (fist) gesture recognition.
  *
- * A "clap" is detected when both palms come within a threshold distance of each other.
- * The pop point is the midpoint between the two palms at the moment they first touch.
+ * A "squeeze" is detected when a hand transitions from open to closed fist.
+ * Each hand can independently trigger pops at the fist position.
  */
 class HandTracker {
     constructor() {
@@ -12,20 +12,14 @@ class HandTracker {
         this.isReady = false;
 
         // Latest hand data
-        this.leftPalm = null;
-        this.rightPalm = null;
         this.landmarks = [];
-        this.wasClapping = false;
-        this.clapCooldown = 0;
-
-        // Normalized distance threshold (in 0-1 coordinate space)
-        this.clapThreshold = 0.08;
-        // Minimum frames between claps to prevent rapid-fire
-        this.clapCooldownFrames = 8;
+        this.handStates = {};       // 'left' | 'right' -> { open, palm }
+        this.squeezeCooldown = { left: 0, right: 0 };
+        this.cooldownFrames = 15;
 
         // Callbacks
-        this.onClap = null;
-        this.onHandsUpdate = null;
+        this.onSqueeze = null;      // ({ x, y }) => void
+        this.onHandsUpdate = null;  // (landmarks, squeezeInfo) => void
     }
 
     async init(videoElement) {
@@ -65,62 +59,72 @@ class HandTracker {
         this.landmarks = results.multiHandLandmarks || [];
         const handedness = results.multiHandedness || [];
 
-        this.leftPalm = null;
-        this.rightPalm = null;
+        const currentHands = {};
 
         for (let i = 0; i < this.landmarks.length; i++) {
             const hand = this.landmarks[i];
             const label = handedness[i]?.label;
+            // MediaPipe labels are mirrored in selfie mode
+            const side = label === 'Right' ? 'left' : 'right';
 
-            const palmCenter = this._getPalmCenter(hand);
+            const palm = this._getPalmCenter(hand);
+            const open = this._isHandOpen(hand);
+            currentHands[side] = { palm, open };
+        }
 
-            // MediaPipe labels are mirrored in selfie mode:
-            // "Right" label = user's left hand on screen, etc.
-            if (label === 'Right') {
-                this.leftPalm = palmCenter;
-            } else {
-                this.rightPalm = palmCenter;
+        // Check for squeezes (open → fist transition)
+        for (const side of ['left', 'right']) {
+            if (this.squeezeCooldown[side] > 0) {
+                this.squeezeCooldown[side]--;
             }
-        }
 
-        // Cooldown tick
-        if (this.clapCooldown > 0) {
-            this.clapCooldown--;
-        }
+            const cur = currentHands[side];
+            const prev = this.handStates[side];
 
-        // Clap detection
-        if (this.leftPalm && this.rightPalm) {
-            const distance = this._getDistance(this.leftPalm, this.rightPalm);
-            const isClapping = distance < this.clapThreshold;
-
-            // Trigger on transition from not-clapping to clapping
-            if (isClapping && !this.wasClapping && this.clapCooldown <= 0) {
-                const clapPoint = {
-                    x: (this.leftPalm.x + this.rightPalm.x) / 2,
-                    y: (this.leftPalm.y + this.rightPalm.y) / 2
-                };
-
-                if (this.onClap) {
-                    this.onClap(clapPoint);
+            if (cur && prev) {
+                if (prev.open && !cur.open && this.squeezeCooldown[side] <= 0) {
+                    if (this.onSqueeze) {
+                        this.onSqueeze({ x: cur.palm.x, y: cur.palm.y });
+                    }
+                    this.squeezeCooldown[side] = this.cooldownFrames;
                 }
-
-                this.clapCooldown = this.clapCooldownFrames;
             }
+        }
 
-            this.wasClapping = isClapping;
-        } else {
-            this.wasClapping = false;
+        // Save state for next frame
+        this.handStates = {};
+        for (const [side, data] of Object.entries(currentHands)) {
+            this.handStates[side] = { open: data.open, palm: data.palm };
         }
 
         if (this.onHandsUpdate) {
-            this.onHandsUpdate(this.landmarks, this.leftPalm, this.rightPalm);
+            this.onHandsUpdate(this.landmarks, currentHands);
         }
     }
 
     /**
-     * Compute the palm center as the average of wrist and finger MCP joints.
-     * Indices: 0=wrist, 5=index_MCP, 9=middle_MCP, 13=ring_MCP, 17=pinky_MCP
+     * Determine if a hand is open (fingers extended) or closed (fist).
+     * Compares each fingertip distance from wrist vs its MCP joint distance.
+     * If most fingertips are closer to the wrist than their MCP, fingers are curled.
      */
+    _isHandOpen(hand) {
+        const wrist = hand[0];
+        const fingertips = [8, 12, 16, 20]; // index, middle, ring, pinky tips
+        const mcps = [5, 9, 13, 17];        // corresponding MCP joints
+
+        let curled = 0;
+        for (let i = 0; i < fingertips.length; i++) {
+            const tipDist = this._getDistance(wrist, hand[fingertips[i]]);
+            const mcpDist = this._getDistance(wrist, hand[mcps[i]]);
+            if (tipDist < mcpDist * 1.15) {
+                curled++;
+            }
+        }
+
+        // 3+ curled fingers = fist
+        return curled < 3;
+    }
+
     _getPalmCenter(hand) {
         const indices = [0, 5, 9, 13, 17];
         let x = 0, y = 0;

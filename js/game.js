@@ -1,23 +1,102 @@
 /**
  * Game - Core game engine managing balloons, physics, collisions, and rendering.
  *
- * The host is authoritative: it spawns balloons and validates pops.
- * All players share the same balloon set (synced via Network).
+ * When a balloon is popped it flies off in a random direction, leaving a magic
+ * sparkle trail, bouncing off screen edges, then finally exploding.
  */
 
 class Balloon {
     constructor(id, x, speed, color, size) {
         this.id = id;
-        this.x = x;          // 0-1 normalised
-        this.y = -0.1;        // starts above screen
-        this.speed = speed;    // normalised units / second
+        this.x = x;
+        this.y = -0.1;
+        this.speed = speed;
         this.color = color;
-        this.size = size;      // normalised radius
+        this.size = size;
         this.alive = true;
         this.poppedBy = null;
         this.wobbleOffset = Math.random() * Math.PI * 2;
         this.wobbleSpeed = 1.5 + Math.random();
         this.wobbleAmount = 0.008 + Math.random() * 0.006;
+    }
+}
+
+/** A popped balloon that flies away with a trail before its final explosion */
+class FlyingBalloon {
+    constructor(x, y, color, size) {
+        this.x = x;
+        this.y = y;
+        const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.4;
+        const spd = 0.5 + Math.random() * 0.4;
+        this.vx = Math.cos(angle) * spd;
+        this.vy = Math.sin(angle) * spd;
+        this.color = color;
+        this.size = size;
+        this.originalSize = size;
+        this.bounces = 0;
+        this.maxBounces = 3;
+        this.time = 0;
+        this.maxTime = 1.6;
+        this.trail = [];
+        this.alive = true;
+        this.trailTimer = 0;
+        this.sparkleTimer = 0;
+        this.rotation = 0;
+        this.rotationSpeed = (Math.random() - 0.5) * 12;
+    }
+
+    update(dt) {
+        this.time += dt;
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.vy += 0.15 * dt; // gravity
+        this.rotation += this.rotationSpeed * dt;
+
+        // Shrink over time
+        const lifeProgress = this.time / this.maxTime;
+        this.size = this.originalSize * (1 - lifeProgress * 0.6);
+
+        // Spawn trail particles
+        this.trailTimer += dt;
+        if (this.trailTimer > 0.02) {
+            this.trailTimer = 0;
+            const hueShift = (this.time * 200) % 360;
+            this.trail.push({
+                x: this.x + (Math.random() - 0.5) * this.size * 0.5,
+                y: this.y + (Math.random() - 0.5) * this.size * 0.5,
+                color: this.color,
+                hue: hueShift,
+                time: 0,
+                duration: 0.5 + Math.random() * 0.3,
+                size: this.size * (0.2 + Math.random() * 0.3),
+                isStar: Math.random() < 0.4,
+                angle: Math.random() * Math.PI * 2
+            });
+        }
+
+        // Update trail
+        this.trail = this.trail.filter(p => { p.time += dt; return p.time < p.duration; });
+
+        // Bounce off edges
+        let bounced = false;
+        if (this.x < 0.03) { this.vx = Math.abs(this.vx) * 0.75; this.x = 0.03; bounced = true; }
+        if (this.x > 0.97) { this.vx = -Math.abs(this.vx) * 0.75; this.x = 0.97; bounced = true; }
+        if (this.y < 0.03) { this.vy = Math.abs(this.vy) * 0.75; this.y = 0.03; bounced = true; }
+        if (this.y > 0.97) { this.vy = -Math.abs(this.vy) * 0.75; this.y = 0.97; bounced = true; }
+
+        if (bounced) this.bounces++;
+
+        // Check if done
+        if (this.time >= this.maxTime || this.bounces > this.maxBounces) {
+            this.alive = false;
+        }
+
+        // Check sparkle sound timer
+        this.sparkleTimer += dt;
+        const shouldSparkle = this.sparkleTimer > 0.25;
+        if (shouldSparkle) this.sparkleTimer = 0;
+
+        return { bounced, shouldSparkle };
     }
 }
 
@@ -28,14 +107,15 @@ class Game {
 
         // State
         this.balloons = new Map();
-        this.players = new Map();       // playerId -> { name, score, color }
+        this.players = new Map();
+        this.flyingBalloons = [];
         this.popEffects = [];
-        this.clapEffects = [];
+        this.squeezeEffects = [];
         this.isRunning = false;
         this.isHost = false;
 
         // Timing
-        this.gameDuration = 60;         // seconds
+        this.gameDuration = 60;
         this.timeRemaining = this.gameDuration;
         this.gameTime = 0;
         this.startTime = 0;
@@ -51,6 +131,9 @@ class Game {
         this.onGameOver = null;
         this.onTimeUpdate = null;
         this.onScoreUpdate = null;
+        this.onBounce = null;
+        this.onFinalPop = null;
+        this.onSparkle = null;
 
         // Palette
         this.playerColors = [
@@ -101,13 +184,12 @@ class Game {
         this.gameTime = 0;
         this.timeRemaining = this.gameDuration;
         this.balloons.clear();
+        this.flyingBalloons = [];
         this.popEffects = [];
-        this.clapEffects = [];
+        this.squeezeEffects = [];
         this.balloonIdCounter = 0;
 
-        for (const [, player] of this.players) {
-            player.score = 0;
-        }
+        for (const [, p] of this.players) p.score = 0;
 
         this._gameLoop();
     }
@@ -120,7 +202,7 @@ class Game {
         if (!this.isRunning) return;
 
         const now = performance.now();
-        const dt = Math.min((now - this.lastFrameTime) / 1000, 0.1); // cap to avoid jumps
+        const dt = Math.min((now - this.lastFrameTime) / 1000, 0.1);
         this.lastFrameTime = now;
         this.gameTime = (now - this.startTime) / 1000;
         this.timeRemaining = Math.max(0, this.gameDuration - this.gameTime);
@@ -130,14 +212,11 @@ class Game {
         if (this.timeRemaining <= 0) {
             this.isRunning = false;
             if (this.onGameOver) this.onGameOver(this.getScores());
-            // Final render
             this._render(dt);
             return;
         }
 
-        // Spawn (host only)
         if (this.isHost) {
-            // Gradually increase spawn rate from every 1.5s down to 0.4s
             const spawnInterval = Math.max(0.4, 1.5 - (this.gameTime / this.gameDuration) * 1.1);
             if (this.gameTime - this.lastSpawnTime >= spawnInterval) {
                 this._spawnBalloon();
@@ -146,6 +225,7 @@ class Game {
         }
 
         this._updateBalloons(dt);
+        this._updateFlyingBalloons(dt);
         this._updateEffects(dt);
         this._render(dt);
 
@@ -169,7 +249,6 @@ class Game {
         }
     }
 
-    /** Called on clients when the host broadcasts a new balloon */
     addBalloon(data) {
         const balloon = new Balloon(data.id, data.x, data.speed, data.color, data.size);
         this.balloons.set(data.id, balloon);
@@ -179,26 +258,44 @@ class Game {
         for (const [id, b] of this.balloons) {
             if (!b.alive) continue;
             b.y += b.speed * dt;
-            // Gentle sideways wobble
             b.x += Math.sin(this.gameTime * b.wobbleSpeed + b.wobbleOffset) * b.wobbleAmount * dt;
-            // Remove if fallen off screen
-            if (b.y > 1.3) {
-                this.balloons.delete(id);
-            }
+            if (b.y > 1.3) this.balloons.delete(id);
         }
     }
 
-    /**
-     * Check which alive balloons are near the given normalised (x, y) clap point.
-     * Returns an array of balloon IDs hit.
-     */
-    checkPop(clapX, clapY) {
+    /* ==================== FLYING BALLOONS ==================== */
+
+    _updateFlyingBalloons(dt) {
+        this.flyingBalloons = this.flyingBalloons.filter(fb => {
+            const result = fb.update(dt);
+
+            if (result.bounced && this.onBounce) this.onBounce();
+            if (result.shouldSparkle && this.onSparkle) this.onSparkle();
+
+            if (!fb.alive) {
+                // Final explosion
+                this.popEffects.push({
+                    x: fb.x, y: fb.y,
+                    color: fb.color,
+                    size: fb.originalSize * 1.5,
+                    time: 0, duration: 0.55
+                });
+                if (this.onFinalPop) this.onFinalPop();
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /* ==================== POP LOGIC ==================== */
+
+    checkPop(px, py) {
         const hitRadius = 0.08;
         const hits = [];
         for (const [id, b] of this.balloons) {
             if (!b.alive) continue;
-            const dx = clapX - b.x;
-            const dy = clapY - b.y;
+            const dx = px - b.x;
+            const dy = py - b.y;
             if (Math.sqrt(dx * dx + dy * dy) < hitRadius + b.size) {
                 hits.push(id);
             }
@@ -207,38 +304,36 @@ class Game {
     }
 
     /**
-     * Pop a balloon and credit a player. Returns true if the balloon was still alive.
+     * Pop a balloon: removes it from the field, creates a FlyingBalloon,
+     * and credits the player.
      */
     popBalloon(balloonId, playerId) {
         const b = this.balloons.get(balloonId);
         if (!b || !b.alive) return false;
 
         b.alive = false;
-        b.poppedBy = playerId;
 
-        this.popEffects.push({
-            x: b.x, y: b.y,
-            color: b.color,
-            size: b.size,
-            time: 0, duration: 0.45
-        });
+        // Create flying balloon
+        this.flyingBalloons.push(new FlyingBalloon(b.x, b.y, b.color, b.size));
 
+        // Remove from map
+        this.balloons.delete(balloonId);
+
+        // Update score
         const player = this.players.get(playerId);
         if (player) {
             player.score++;
             if (this.onScoreUpdate) this.onScoreUpdate(this.getScores());
         }
 
-        // Clean up after animation
-        setTimeout(() => this.balloons.delete(balloonId), 500);
         return true;
     }
 
-    /** Visual feedback for a clap (whether or not it hit a balloon) */
-    addClapEffect(x, y, hit) {
-        this.clapEffects.push({
+    /** Visual feedback for a squeeze attempt */
+    addSqueezeEffect(x, y, hit) {
+        this.squeezeEffects.push({
             x, y, hit,
-            time: 0, duration: 0.35
+            time: 0, duration: 0.4
         });
     }
 
@@ -263,7 +358,7 @@ class Game {
 
     _updateEffects(dt) {
         this.popEffects = this.popEffects.filter(e => { e.time += dt; return e.time < e.duration; });
-        this.clapEffects = this.clapEffects.filter(e => { e.time += dt; return e.time < e.duration; });
+        this.squeezeEffects = this.squeezeEffects.filter(e => { e.time += dt; return e.time < e.duration; });
     }
 
     /* ==================== RENDERING ==================== */
@@ -274,71 +369,137 @@ class Game {
         const H = this.canvas.height;
         ctx.clearRect(0, 0, W, H);
 
-        // 1. Draw hand skeleton
-        if (this.handData) {
-            this._drawHands(this.handData);
-        }
+        // 1. Hands
+        if (this.handData) this._drawHands(this.handData);
 
-        // 2. Draw balloons
+        // 2. Falling balloons
         for (const [, b] of this.balloons) {
-            if (b.alive) this._drawBalloon(b);
+            if (b.alive) this._drawBalloon(b.x, b.y, b.size, b.color, 1, 0);
         }
 
-        // 3. Draw pop effects
+        // 3. Flying balloon trails
+        for (const fb of this.flyingBalloons) {
+            for (const p of fb.trail) this._drawTrailParticle(p);
+        }
+
+        // 4. Flying balloons
+        for (const fb of this.flyingBalloons) {
+            const alpha = 1 - (fb.time / fb.maxTime) * 0.4;
+            this._drawBalloon(fb.x, fb.y, fb.size, fb.color, alpha, fb.rotation);
+        }
+
+        // 5. Pop explosions
         for (const e of this.popEffects) this._drawPopEffect(e);
 
-        // 4. Draw clap effects
-        for (const e of this.clapEffects) this._drawClapEffect(e);
+        // 6. Squeeze feedback
+        for (const e of this.squeezeEffects) this._drawSqueezeEffect(e);
     }
 
-    _drawBalloon(b) {
+    _drawBalloon(bx, by, bsize, bcolor, alpha, rotation) {
         const ctx = this.ctx;
         const W = this.canvas.width;
         const H = this.canvas.height;
-        const x = b.x * W;
-        const y = b.y * H;
-        const r = b.size * W;
+        const x = bx * W;
+        const y = by * H;
+        const r = bsize * W;
 
         ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.translate(x, y);
+        ctx.rotate(rotation);
 
-        // Soft shadow
+        // Shadow
         ctx.shadowColor = 'rgba(0,0,0,0.25)';
         ctx.shadowBlur = 12;
         ctx.shadowOffsetY = 6;
 
         // Oval body
         ctx.beginPath();
-        ctx.ellipse(x, y, r * 0.85, r, 0, 0, Math.PI * 2);
-        const grad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.05, x, y, r);
-        grad.addColorStop(0, this._lighten(b.color, 50));
-        grad.addColorStop(0.6, b.color);
-        grad.addColorStop(1, this._darken(b.color, 30));
+        ctx.ellipse(0, 0, r * 0.85, r, 0, 0, Math.PI * 2);
+        const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r);
+        grad.addColorStop(0, this._lighten(bcolor, 50));
+        grad.addColorStop(0.6, bcolor);
+        grad.addColorStop(1, this._darken(bcolor, 30));
         ctx.fillStyle = grad;
         ctx.fill();
 
         // Shine
         ctx.shadowColor = 'transparent';
         ctx.beginPath();
-        ctx.ellipse(x - r * 0.25, y - r * 0.35, r * 0.14, r * 0.24, -0.5, 0, Math.PI * 2);
+        ctx.ellipse(-r * 0.25, -r * 0.35, r * 0.14, r * 0.24, -0.5, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(255,255,255,0.45)';
         ctx.fill();
 
         // Knot
         ctx.beginPath();
-        ctx.moveTo(x - 3, y + r);
-        ctx.lineTo(x, y + r + 7);
-        ctx.lineTo(x + 3, y + r);
+        ctx.moveTo(-3, r);
+        ctx.lineTo(0, r + 7);
+        ctx.lineTo(3, r);
         ctx.closePath();
-        ctx.fillStyle = this._darken(b.color, 40);
+        ctx.fillStyle = this._darken(bcolor, 40);
         ctx.fill();
 
         // String
         ctx.beginPath();
-        ctx.moveTo(x, y + r + 7);
-        ctx.quadraticCurveTo(x + 8, y + r + 28, x - 4, y + r + 48);
+        ctx.moveTo(0, r + 7);
+        ctx.quadraticCurveTo(8, r + 28, -4, r + 48);
         ctx.strokeStyle = 'rgba(255,255,255,0.35)';
         ctx.lineWidth = 1;
         ctx.stroke();
+
+        ctx.restore();
+    }
+
+    _drawTrailParticle(p) {
+        const ctx = this.ctx;
+        const W = this.canvas.width;
+        const H = this.canvas.height;
+        const x = p.x * W;
+        const y = p.y * H;
+        const progress = p.time / p.duration;
+        const alpha = (1 - progress) * 0.9;
+        const sz = p.size * W * (1 - progress * 0.6);
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+
+        if (p.isStar) {
+            // 4-pointed star sparkle
+            ctx.translate(x, y);
+            ctx.rotate(p.angle + p.time * 5);
+            ctx.shadowColor = p.color;
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            for (let i = 0; i < 4; i++) {
+                const a = (i / 4) * Math.PI * 2;
+                ctx.moveTo(0, 0);
+                ctx.lineTo(Math.cos(a) * sz * 1.5, Math.sin(a) * sz * 1.5);
+            }
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Center dot
+            ctx.beginPath();
+            ctx.arc(0, 0, sz * 0.3, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+        } else {
+            // Glowing circle
+            ctx.shadowColor = p.color;
+            ctx.shadowBlur = 15;
+            ctx.beginPath();
+            ctx.arc(x, y, sz, 0, Math.PI * 2);
+            ctx.fillStyle = p.color;
+            ctx.fill();
+
+            // Bright center
+            ctx.shadowBlur = 0;
+            ctx.beginPath();
+            ctx.arc(x, y, sz * 0.35, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.8)';
+            ctx.fill();
+        }
 
         ctx.restore();
     }
@@ -347,37 +508,50 @@ class Game {
         const ctx = this.ctx;
         const x = e.x * this.canvas.width;
         const y = e.y * this.canvas.height;
-        const p = e.time / e.duration; // 0 → 1
+        const p = e.time / e.duration;
         const r = e.size * this.canvas.width;
 
         ctx.save();
         ctx.globalAlpha = 1 - p;
 
-        // Particles
-        const n = 10;
+        // Particle burst
+        const n = 14;
         for (let i = 0; i < n; i++) {
-            const angle = (i / n) * Math.PI * 2 + e.time * 4;
-            const dist = r * (1 + p * 3);
+            const angle = (i / n) * Math.PI * 2 + e.time * 3;
+            const dist = r * (1 + p * 4);
             const px = x + Math.cos(angle) * dist;
             const py = y + Math.sin(angle) * dist;
-            const sz = (1 - p) * 7;
+            const sz = (1 - p) * 8;
+
+            ctx.shadowColor = e.color;
+            ctx.shadowBlur = 10;
             ctx.beginPath();
             ctx.arc(px, py, sz, 0, Math.PI * 2);
-            ctx.fillStyle = e.color;
+            ctx.fillStyle = i % 2 === 0 ? e.color : '#fff';
             ctx.fill();
         }
 
         // Expanding ring
+        ctx.shadowBlur = 0;
         ctx.beginPath();
-        ctx.arc(x, y, r * (1 + p * 3.5), 0, Math.PI * 2);
+        ctx.arc(x, y, r * (1 + p * 4), 0, Math.PI * 2);
         ctx.strokeStyle = e.color;
-        ctx.lineWidth = 3 * (1 - p);
+        ctx.lineWidth = 4 * (1 - p);
         ctx.stroke();
+
+        // Inner flash
+        if (p < 0.3) {
+            ctx.globalAlpha = (0.3 - p) / 0.3;
+            ctx.beginPath();
+            ctx.arc(x, y, r * (1 + p * 2), 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            ctx.fill();
+        }
 
         ctx.restore();
     }
 
-    _drawClapEffect(e) {
+    _drawSqueezeEffect(e) {
         const ctx = this.ctx;
         const x = e.x * this.canvas.width;
         const y = e.y * this.canvas.height;
@@ -385,11 +559,25 @@ class Game {
 
         ctx.save();
         ctx.globalAlpha = 1 - p;
-        ctx.beginPath();
-        ctx.arc(x, y, 20 + p * 60, 0, Math.PI * 2);
-        ctx.strokeStyle = e.hit ? '#6bcb77' : 'rgba(255,255,255,0.6)';
-        ctx.lineWidth = 3 * (1 - p);
-        ctx.stroke();
+
+        if (e.hit) {
+            // Hit flash: expanding green ring with glow
+            ctx.shadowColor = '#6bcb77';
+            ctx.shadowBlur = 20;
+            ctx.beginPath();
+            ctx.arc(x, y, 15 + p * 50, 0, Math.PI * 2);
+            ctx.strokeStyle = '#6bcb77';
+            ctx.lineWidth = 4 * (1 - p);
+            ctx.stroke();
+        } else {
+            // Miss: subtle white ring
+            ctx.beginPath();
+            ctx.arc(x, y, 15 + p * 40, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+            ctx.lineWidth = 2 * (1 - p);
+            ctx.stroke();
+        }
+
         ctx.restore();
     }
 
@@ -408,7 +596,6 @@ class Game {
         ];
 
         for (const hand of data.landmarks) {
-            // Bones
             ctx.strokeStyle = 'rgba(0, 255, 128, 0.45)';
             ctx.lineWidth = 2;
             for (const [a, b] of CONNECTIONS) {
@@ -419,8 +606,6 @@ class Game {
                 ctx.lineTo(bx, by);
                 ctx.stroke();
             }
-
-            // Joints
             for (const lm of hand) {
                 ctx.beginPath();
                 ctx.arc((1 - lm.x) * W, lm.y * H, 3.5, 0, Math.PI * 2);
@@ -429,31 +614,41 @@ class Game {
             }
         }
 
-        // Draw guide line between palms when both visible
-        if (data.leftPalm && data.rightPalm) {
-            const lx = (1 - data.leftPalm.x) * W, ly = data.leftPalm.y * H;
-            const rx = (1 - data.rightPalm.x) * W, ry = data.rightPalm.y * H;
-            const dist = Math.sqrt((lx - rx) ** 2 + (ly - ry) ** 2);
-            const close = dist < W * 0.08;
+        // Draw squeeze indicators for each hand
+        if (data.squeezeInfo) {
+            for (const side of ['left', 'right']) {
+                const hand = data.squeezeInfo[side];
+                if (!hand) continue;
 
-            ctx.save();
-            ctx.setLineDash([6, 6]);
-            ctx.strokeStyle = close ? 'rgba(255, 80, 80, 0.8)' : 'rgba(255, 255, 100, 0.4)';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(lx, ly);
-            ctx.lineTo(rx, ry);
-            ctx.stroke();
-            ctx.setLineDash([]);
+                const px = (1 - hand.palm.x) * W;
+                const py = hand.palm.y * H;
 
-            // Midpoint indicator
-            const mx = (lx + rx) / 2, my = (ly + ry) / 2;
-            ctx.beginPath();
-            ctx.arc(mx, my, close ? 18 : 12, 0, Math.PI * 2);
-            ctx.strokeStyle = close ? 'rgba(255, 80, 80, 0.7)' : 'rgba(255, 255, 100, 0.35)';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-            ctx.restore();
+                ctx.save();
+                if (!hand.open) {
+                    // Fist: glowing red circle
+                    ctx.shadowColor = '#ff6b6b';
+                    ctx.shadowBlur = 25;
+                    ctx.beginPath();
+                    ctx.arc(px, py, 22, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+
+                    ctx.shadowBlur = 0;
+                    ctx.beginPath();
+                    ctx.arc(px, py, 6, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(255, 100, 100, 0.6)';
+                    ctx.fill();
+                } else {
+                    // Open: subtle circle
+                    ctx.beginPath();
+                    ctx.arc(px, py, 18, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(255, 255, 100, 0.25)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+                ctx.restore();
+            }
         }
     }
 

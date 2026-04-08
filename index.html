@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AR Balloon Pop - Multiplayer Hand Tracking Game</title>
-    <meta name="description" content="Pop falling balloons by clapping your hands in this multiplayer AR browser game. Uses webcam hand tracking.">
+    <meta name="description" content="Pop falling balloons by squeezing your fist in this multiplayer AR browser game. Uses webcam hand tracking.">
     <link rel="stylesheet" href="css/style.css">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎈</text></svg>">
 </head>
@@ -17,7 +17,7 @@
     <div id="menuScreen" class="screen active">
         <div class="menu-container">
             <h1 class="game-title">AR Balloon Pop</h1>
-            <p class="subtitle">Pop balloons by clapping your hands!</p>
+            <p class="subtitle">Make a fist near a balloon to pop it!</p>
             <div class="name-input-group">
                 <label for="nameInput">Your Name</label>
                 <input type="text" id="nameInput" maxlength="16" placeholder="Enter your name">
@@ -87,6 +87,7 @@
     <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 
     <!-- Game scripts -->
+    <script src="js/sound.js"></script>
     <script src="js/hand-tracker.js"></script>
     <script src="js/network.js"></script>
     <script src="js/game.js"></script>

@@ -1,14 +1,16 @@
 /**
- * App - Main controller tying together HandTracker, Network, and Game.
+ * App - Main controller tying together HandTracker, Network, Game, and SoundManager.
  *
- * Manages screen transitions, user input, and message routing between
- * the hand-tracking layer, the P2P networking layer, and the game engine.
+ * Uses squeeze (fist) gesture to pop balloons. Popped balloons fly away with
+ * magic trails, bounce off edges, then explode with sound effects.
+ * Background music plays during the game.
  */
 class App {
     constructor() {
         this.handTracker = new HandTracker();
         this.network = new Network();
         this.game = new Game(document.getElementById('gameCanvas'));
+        this.sound = new SoundManager();
 
         // Screens
         this.screens = {
@@ -45,10 +47,9 @@ class App {
 
         this.currentScreen = 'menu';
         this.playerName = '';
-        this.players = new Map(); // playerId -> { name }
+        this.players = new Map();
         this.cameraInitialized = false;
 
-        // Random default name
         this.el.nameInput.value = 'Player' + Math.floor(Math.random() * 9000 + 1000);
 
         this._bindEvents();
@@ -69,6 +70,14 @@ class App {
         this.el.codeInput.addEventListener('input', (e) => {
             e.target.value = e.target.value.replace(/[^0-9]/g, '');
         });
+
+        // Unlock audio on first user interaction
+        const unlockAudio = () => {
+            this.sound.init();
+            this.sound.unlock();
+        };
+        document.addEventListener('click', unlockAudio, { once: true });
+        document.addEventListener('touchstart', unlockAudio, { once: true });
     }
 
     /* ==================== SCREEN MANAGEMENT ==================== */
@@ -98,12 +107,11 @@ class App {
         try {
             await this.handTracker.init(this.el.camera);
 
-            this.handTracker.onClap = (pt) => this._handleClap(pt);
-            this.handTracker.onHandsUpdate = (landmarks, lp, rp) => {
-                // Feed latest data into game for rendering
-                this.game.handData = { landmarks, leftPalm: lp, rightPalm: rp };
+            this.handTracker.onSqueeze = (pt) => this._handleSqueeze(pt);
+            this.handTracker.onHandsUpdate = (landmarks, squeezeInfo) => {
+                this.game.handData = { landmarks, squeezeInfo };
                 if (this.currentScreen === 'game') {
-                    this._updateHandStatus(landmarks.length);
+                    this._updateHandStatus(landmarks.length, squeezeInfo);
                 }
             };
 
@@ -128,6 +136,8 @@ class App {
 
     async _onHost() {
         this._getPlayerName();
+        this.sound.init();
+        this.sound.unlock();
         if (!(await this._initCamera())) return;
 
         this._showLoading('Creating room...');
@@ -168,6 +178,8 @@ class App {
         }
 
         this._getPlayerName();
+        this.sound.init();
+        this.sound.unlock();
         if (!(await this._initCamera())) return;
 
         this._showLoading('Joining room ' + code + '...');
@@ -223,6 +235,7 @@ class App {
         if (data.type === 'pop-attempt') {
             const ok = this.game.popBalloon(data.balloonId, data.playerId);
             if (ok) {
+                this.sound.playPop();
                 this.network.broadcast({
                     type: 'balloon-popped',
                     balloonId: data.balloonId,
@@ -257,7 +270,6 @@ class App {
                 break;
 
             case 'game-start':
-                // Rebuild full player list from host
                 this.game.players.clear();
                 for (const p of data.players) {
                     this.game.addPlayer(p.id, p.name);
@@ -274,6 +286,7 @@ class App {
 
             case 'balloon-popped':
                 this.game.popBalloon(data.balloonId, data.playerId);
+                this.sound.playPop();
                 if (data.scores) this.game.setScores(data.scores);
                 this._renderScores();
                 break;
@@ -292,14 +305,12 @@ class App {
     /* ==================== GAME START ==================== */
 
     _onStartGame() {
-        // Broadcast game start to all clients
         const playerList = [];
         for (const [id] of this.players) {
             const gp = this.game.players.get(id);
             playerList.push({ id, name: gp ? gp.name : '?', color: gp ? gp.color : '#fff' });
         }
         this.network.broadcast({ type: 'game-start', players: playerList });
-
         this._runCountdownThenStart();
     }
 
@@ -314,9 +325,8 @@ class App {
             count--;
             if (count > 0) {
                 this.el.countdownNumber.textContent = count;
-                // Re-trigger animation
                 this.el.countdownNumber.style.animation = 'none';
-                void this.el.countdownNumber.offsetHeight; // reflow
+                void this.el.countdownNumber.offsetHeight;
                 this.el.countdownNumber.style.animation = '';
                 setTimeout(tick, 800);
             } else {
@@ -335,19 +345,23 @@ class App {
     }
 
     _beginGame() {
+        // Balloon spawn
         this.game.onBalloonSpawn = (d) => {
             if (this.network.isHost) {
                 this.network.broadcast({ type: 'balloon-spawn', balloon: d });
             }
         };
 
+        // Game over
         this.game.onGameOver = (scores) => {
+            this.sound.stopMusic();
             if (this.network.isHost) {
                 this.network.broadcast({ type: 'game-over', scores });
             }
             this._endGame(scores);
         };
 
+        // Timer
         this.game.onTimeUpdate = (t) => {
             this.el.timer.textContent = t;
             if (t <= 10) {
@@ -357,30 +371,44 @@ class App {
             }
         };
 
+        // Scores
         this.game.onScoreUpdate = () => this._renderScores();
 
+        // Sound callbacks from game engine
+        this.game.onBounce = () => this.sound.playBounce();
+        this.game.onFinalPop = () => this.sound.playExplode();
+        this.game.onSparkle = () => this.sound.playSparkle();
+
         this._renderScores();
+
+        // Start background music
+        this.sound.init();
+        this.sound.unlock();
+        this.sound.startMusic();
+
         this.game.start(this.network.isHost);
     }
 
-    /* ==================== CLAP HANDLING ==================== */
+    /* ==================== SQUEEZE HANDLING ==================== */
 
-    _handleClap(clapPoint) {
+    _handleSqueeze(squeezePoint) {
         if (this.currentScreen !== 'game' || !this.game.isRunning) return;
 
         // Mirror x because camera CSS is flipped
-        const mx = 1 - clapPoint.x;
-        const my = clapPoint.y;
+        const mx = 1 - squeezePoint.x;
+        const my = squeezePoint.y;
 
         const hits = this.game.checkPop(mx, my);
 
-        // Visual feedback at clap point
-        this.game.addClapEffect(mx, my, hits.length > 0);
+        // Visual feedback
+        this.game.addSqueezeEffect(mx, my, hits.length > 0);
 
         if (this.network.isHost) {
             for (const id of hits) {
                 const ok = this.game.popBalloon(id, 'host');
                 if (ok) {
+                    this.sound.playPop();
+                    this.sound.playScore();
                     this.network.broadcast({
                         type: 'balloon-popped',
                         balloonId: id,
@@ -397,29 +425,34 @@ class App {
                     balloonId: id,
                     playerId: this.network.playerId
                 });
+                // Optimistic local pop for responsiveness
+                this.sound.playPop();
             }
         }
     }
 
     /* ==================== UI HELPERS ==================== */
 
-    _updateHandStatus(count) {
+    _updateHandStatus(count, squeezeInfo) {
         const el = this.el.handStatus;
         if (count === 0) {
             el.textContent = 'Show your hands to the camera!';
             el.style.opacity = '1';
-        } else if (count === 1) {
-            el.textContent = 'Show both hands to clap!';
-            el.style.opacity = '1';
         } else {
-            el.textContent = 'Clap your hands to pop balloons!';
-            el.style.opacity = '0.4';
+            // Check if any hand is making a fist
+            const anyFist = squeezeInfo && Object.values(squeezeInfo).some(h => !h.open);
+            if (anyFist) {
+                el.textContent = 'Move your fist near a balloon!';
+                el.style.opacity = '0.7';
+            } else {
+                el.textContent = 'Make a fist near a balloon to pop it!';
+                el.style.opacity = '0.4';
+            }
         }
     }
 
     _renderPlayerList() {
         let html = '';
-        let idx = 0;
         for (const [id, p] of this.players) {
             const gp = this.game.players.get(id);
             const color = gp ? gp.color : '#888';
@@ -428,7 +461,6 @@ class App {
                 <span class="player-name">${this._esc(p.name)}</span>
                 ${id === 'host' ? '<span class="player-host">HOST</span>' : ''}
             </div>`;
-            idx++;
         }
         this.el.playerList.innerHTML = html;
     }
@@ -447,6 +479,7 @@ class App {
 
     _endGame(scores) {
         this.game.stop();
+        this.sound.stopMusic();
 
         if (scores && scores.length > 0) {
             if (scores.length > 1 && scores[0].score === scores[1].score) {
@@ -475,10 +508,12 @@ class App {
 
     _backToMenu() {
         this.game.stop();
+        this.sound.stopMusic();
         this.network.destroy();
         this.players.clear();
         this.game.players.clear();
         this.game.balloons.clear();
+        this.game.flyingBalloons = [];
         this.network = new Network();
         this.el.joinForm.classList.add('hidden');
         this.el.timer.classList.remove('warning');
