@@ -30,8 +30,8 @@ class SoundManager {
             }
         }
 
-        // Background music
-        this.music = new Audio(basePath + 'music.wav');
+        // Background music (CC0 "Comic Game Loop - Mischief" from FreePD.com)
+        this.music = new Audio(basePath + 'music.mp3');
         this.music.preload = 'auto';
         this.music.loop = true;
         this.music.volume = 0.3;
