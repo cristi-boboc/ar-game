@@ -33,9 +33,9 @@ class HandTracker {
 
         this.hands.setOptions({
             maxNumHands: 2,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.65,
-            minTrackingConfidence: 0.5
+            modelComplexity: 0,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.45
         });
 
         this.hands.onResults((results) => this._onResults(results));

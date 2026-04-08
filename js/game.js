@@ -56,20 +56,18 @@ class FlyingBalloon {
         const lifeProgress = this.time / this.maxTime;
         this.size = this.originalSize * (1 - lifeProgress * 0.6);
 
-        // Spawn trail particles
+        // Spawn trail particles (throttled, capped)
         this.trailTimer += dt;
-        if (this.trailTimer > 0.02) {
+        if (this.trailTimer > 0.06 && this.trail.length < 15) {
             this.trailTimer = 0;
-            const hueShift = (this.time * 200) % 360;
             this.trail.push({
-                x: this.x + (Math.random() - 0.5) * this.size * 0.5,
-                y: this.y + (Math.random() - 0.5) * this.size * 0.5,
+                x: this.x + (Math.random() - 0.5) * this.size * 0.4,
+                y: this.y + (Math.random() - 0.5) * this.size * 0.4,
                 color: this.color,
-                hue: hueShift,
                 time: 0,
-                duration: 0.5 + Math.random() * 0.3,
-                size: this.size * (0.2 + Math.random() * 0.3),
-                isStar: Math.random() < 0.4,
+                duration: 0.35,
+                size: this.size * (0.2 + Math.random() * 0.2),
+                isStar: Math.random() < 0.35,
                 angle: Math.random() * Math.PI * 2
             });
         }
@@ -103,7 +101,8 @@ class FlyingBalloon {
 class Game {
     constructor(canvas) {
         this.canvas = canvas;
-        this.ctx = canvas.getContext('2d');
+        this.ctx = canvas.getContext('2d', { alpha: true });
+        this.ctx.imageSmoothingEnabled = false;
 
         // State
         this.balloons = new Map();
@@ -435,26 +434,21 @@ class Game {
         ctx.translate(x, y);
         ctx.rotate(rotation);
 
-        // Shadow
-        ctx.shadowColor = 'rgba(0,0,0,0.25)';
-        ctx.shadowBlur = 12;
-        ctx.shadowOffsetY = 6;
-
-        // Oval body
+        // Oval body (solid fill — no expensive gradient/shadow)
         ctx.beginPath();
         ctx.ellipse(0, 0, r * 0.85, r, 0, 0, Math.PI * 2);
-        const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r);
-        grad.addColorStop(0, this._lighten(bcolor, 50));
-        grad.addColorStop(0.6, bcolor);
-        grad.addColorStop(1, this._darken(bcolor, 30));
-        ctx.fillStyle = grad;
+        ctx.fillStyle = bcolor;
         ctx.fill();
 
-        // Shine
-        ctx.shadowColor = 'transparent';
+        // Dark edge ring
+        ctx.strokeStyle = this._darken(bcolor, 25);
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Shine highlight
         ctx.beginPath();
-        ctx.ellipse(-r * 0.25, -r * 0.35, r * 0.14, r * 0.24, -0.5, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.ellipse(-r * 0.22, -r * 0.3, r * 0.13, r * 0.22, -0.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
         ctx.fill();
 
         // Knot
@@ -469,8 +463,8 @@ class Game {
         // String
         ctx.beginPath();
         ctx.moveTo(0, r + 7);
-        ctx.quadraticCurveTo(8, r + 28, -4, r + 48);
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineTo(-4, r + 42);
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
         ctx.lineWidth = 1;
         ctx.stroke();
 
@@ -479,56 +473,40 @@ class Game {
 
     _drawTrailParticle(p) {
         const ctx = this.ctx;
-        const W = this.canvas.width;
-        const H = this.canvas.height;
-        const x = p.x * W;
-        const y = p.y * H;
+        const x = p.x * this.canvas.width;
+        const y = p.y * this.canvas.height;
         const progress = p.time / p.duration;
-        const alpha = (1 - progress) * 0.9;
-        const sz = p.size * W * (1 - progress * 0.6);
+        const alpha = (1 - progress) * 0.85;
+        const sz = p.size * this.canvas.width * (1 - progress * 0.5);
 
-        ctx.save();
         ctx.globalAlpha = alpha;
 
         if (p.isStar) {
-            // 4-pointed star sparkle
-            ctx.translate(x, y);
-            ctx.rotate(p.angle + p.time * 5);
-            ctx.shadowColor = p.color;
-            ctx.shadowBlur = 12;
-            ctx.beginPath();
-            for (let i = 0; i < 4; i++) {
-                const a = (i / 4) * Math.PI * 2;
-                ctx.moveTo(0, 0);
-                ctx.lineTo(Math.cos(a) * sz * 1.5, Math.sin(a) * sz * 1.5);
-            }
+            // Simple cross sparkle (no save/restore, no shadow)
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 1.5;
-            ctx.stroke();
-
-            // Center dot
-            ctx.beginPath();
-            ctx.arc(0, 0, sz * 0.3, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff';
-            ctx.fill();
+            const rot = p.angle + p.time * 5;
+            const len = sz * 1.3;
+            for (let i = 0; i < 2; i++) {
+                const a = rot + i * Math.PI * 0.5;
+                ctx.beginPath();
+                ctx.moveTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+                ctx.lineTo(x - Math.cos(a) * len, y - Math.sin(a) * len);
+                ctx.stroke();
+            }
         } else {
-            // Glowing circle
-            ctx.shadowColor = p.color;
-            ctx.shadowBlur = 15;
+            // Colored dot with white center
             ctx.beginPath();
             ctx.arc(x, y, sz, 0, Math.PI * 2);
             ctx.fillStyle = p.color;
             ctx.fill();
-
-            // Bright center
-            ctx.shadowBlur = 0;
             ctx.beginPath();
             ctx.arc(x, y, sz * 0.35, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255,255,255,0.8)';
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
             ctx.fill();
         }
 
-        ctx.restore();
+        ctx.globalAlpha = 1;
     }
 
     _drawPopEffect(e) {
@@ -541,17 +519,14 @@ class Game {
         ctx.save();
         ctx.globalAlpha = 1 - p;
 
-        // Particle burst
-        const n = 14;
+        // Particle burst (8 particles, no shadow)
+        const n = 8;
         for (let i = 0; i < n; i++) {
             const angle = (i / n) * Math.PI * 2 + e.time * 3;
             const dist = r * (1 + p * 4);
             const px = x + Math.cos(angle) * dist;
             const py = y + Math.sin(angle) * dist;
-            const sz = (1 - p) * 8;
-
-            ctx.shadowColor = e.color;
-            ctx.shadowBlur = 10;
+            const sz = (1 - p) * 7;
             ctx.beginPath();
             ctx.arc(px, py, sz, 0, Math.PI * 2);
             ctx.fillStyle = i % 2 === 0 ? e.color : '#fff';
@@ -559,19 +534,18 @@ class Game {
         }
 
         // Expanding ring
-        ctx.shadowBlur = 0;
         ctx.beginPath();
         ctx.arc(x, y, r * (1 + p * 4), 0, Math.PI * 2);
         ctx.strokeStyle = e.color;
-        ctx.lineWidth = 4 * (1 - p);
+        ctx.lineWidth = 3 * (1 - p);
         ctx.stroke();
 
         // Inner flash
-        if (p < 0.3) {
-            ctx.globalAlpha = (0.3 - p) / 0.3;
+        if (p < 0.25) {
+            ctx.globalAlpha = (0.25 - p) / 0.25;
             ctx.beginPath();
             ctx.arc(x, y, r * (1 + p * 2), 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
             ctx.fill();
         }
 
@@ -587,23 +561,11 @@ class Game {
         ctx.save();
         ctx.globalAlpha = 1 - p;
 
-        if (e.hit) {
-            // Hit flash: expanding green ring with glow
-            ctx.shadowColor = '#6bcb77';
-            ctx.shadowBlur = 20;
-            ctx.beginPath();
-            ctx.arc(x, y, 15 + p * 50, 0, Math.PI * 2);
-            ctx.strokeStyle = '#6bcb77';
-            ctx.lineWidth = 4 * (1 - p);
-            ctx.stroke();
-        } else {
-            // Miss: subtle white ring
-            ctx.beginPath();
-            ctx.arc(x, y, 15 + p * 40, 0, Math.PI * 2);
-            ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-            ctx.lineWidth = 2 * (1 - p);
-            ctx.stroke();
-        }
+        ctx.beginPath();
+        ctx.arc(x, y, 15 + p * 50, 0, Math.PI * 2);
+        ctx.strokeStyle = e.hit ? '#6bcb77' : 'rgba(255,255,255,0.4)';
+        ctx.lineWidth = (e.hit ? 4 : 2) * (1 - p);
+        ctx.stroke();
 
         ctx.restore();
     }
@@ -623,22 +585,24 @@ class Game {
         ];
 
         for (const hand of data.landmarks) {
+            // Batch all bone lines into one path
+            ctx.beginPath();
             ctx.strokeStyle = 'rgba(0, 255, 128, 0.45)';
             ctx.lineWidth = 2;
             for (const [a, b] of CONNECTIONS) {
-                const ax = (1 - hand[a].x) * W, ay = hand[a].y * H;
-                const bx = (1 - hand[b].x) * W, by = hand[b].y * H;
-                ctx.beginPath();
-                ctx.moveTo(ax, ay);
-                ctx.lineTo(bx, by);
-                ctx.stroke();
+                ctx.moveTo((1 - hand[a].x) * W, hand[a].y * H);
+                ctx.lineTo((1 - hand[b].x) * W, hand[b].y * H);
             }
+            ctx.stroke();
+
+            // Batch all joint dots into one path
+            ctx.beginPath();
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
             for (const lm of hand) {
-                ctx.beginPath();
-                ctx.arc((1 - lm.x) * W, lm.y * H, 3.5, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(255,255,255,0.75)';
-                ctx.fill();
+                ctx.moveTo((1 - lm.x) * W + 3, lm.y * H);
+                ctx.arc((1 - lm.x) * W, lm.y * H, 3, 0, Math.PI * 2);
             }
+            ctx.fill();
         }
 
         // Draw squeeze indicators for each hand
@@ -650,18 +614,13 @@ class Game {
                 const px = (1 - hand.palm.x) * W;
                 const py = hand.palm.y * H;
 
-                ctx.save();
                 if (!hand.open) {
-                    // Fist: glowing red circle
-                    ctx.shadowColor = '#ff6b6b';
-                    ctx.shadowBlur = 25;
+                    // Fist: red circle indicator
                     ctx.beginPath();
                     ctx.arc(px, py, 22, 0, Math.PI * 2);
                     ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)';
                     ctx.lineWidth = 3;
                     ctx.stroke();
-
-                    ctx.shadowBlur = 0;
                     ctx.beginPath();
                     ctx.arc(px, py, 6, 0, Math.PI * 2);
                     ctx.fillStyle = 'rgba(255, 100, 100, 0.6)';
@@ -674,7 +633,6 @@ class Game {
                     ctx.lineWidth = 1.5;
                     ctx.stroke();
                 }
-                ctx.restore();
             }
         }
     }
