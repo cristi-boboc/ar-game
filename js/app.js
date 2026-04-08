@@ -78,6 +78,15 @@ class App {
         };
         document.addEventListener('click', unlockAudio, { once: true });
         document.addEventListener('touchstart', unlockAudio, { once: true });
+
+        // Stop music when tab is hidden or page is closed
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this.sound.stopMusic();
+        });
+        window.addEventListener('beforeunload', () => {
+            this.sound.stopMusic();
+            this.sound.destroy();
+        });
     }
 
     /* ==================== SCREEN MANAGEMENT ==================== */
