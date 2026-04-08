@@ -235,8 +235,35 @@ class Game {
     /* ==================== BALLOONS ==================== */
 
     _spawnBalloon() {
+        const minSpacing = 0.14; // minimum normalised distance between balloons
+        const maxOnScreen = 6;   // cap active balloons to avoid overwhelming
+
+        // Don't spawn if already at cap
+        let aliveCount = 0;
+        for (const [, b] of this.balloons) { if (b.alive) aliveCount++; }
+        if (aliveCount >= maxOnScreen) return;
+
+        // Pick x position with spacing from existing balloons
+        let x = 0;
+        let attempts = 0;
+        let valid = false;
+        while (attempts < 15) {
+            x = 0.1 + Math.random() * 0.8;
+            valid = true;
+            for (const [, b] of this.balloons) {
+                if (!b.alive) continue;
+                // Only check balloons in the top portion of screen (newly spawned zone)
+                if (b.y < 0.35) {
+                    const dx = Math.abs(b.x - x);
+                    if (dx < minSpacing) { valid = false; break; }
+                }
+            }
+            if (valid) break;
+            attempts++;
+        }
+        if (!valid) return; // skip this spawn cycle, screen is crowded
+
         const id = ++this.balloonIdCounter;
-        const x = 0.1 + Math.random() * 0.8;
         const speed = 0.08 + Math.random() * 0.08;
         const color = this.balloonColors[Math.floor(Math.random() * this.balloonColors.length)];
         const size = 0.035 + Math.random() * 0.02;

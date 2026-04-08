@@ -34,11 +34,19 @@ class SoundManager {
         }
     }
 
+    /** Ensure context is ready before any sound plays */
+    _ready() {
+        if (!this.initialized) this.init();
+        if (!this.ctx) return false;
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        return true;
+    }
+
     /* ==================== SFX ==================== */
 
     /** Initial squeeze-pop: short satisfying pop */
     playPop() {
-        if (!this.ctx) return;
+        if (!this._ready()) return;
         const t = this.ctx.currentTime;
 
         // Sine sweep down
@@ -60,7 +68,7 @@ class SoundManager {
 
     /** Bounce thud */
     playBounce() {
-        if (!this.ctx) return;
+        if (!this._ready()) return;
         const t = this.ctx.currentTime;
 
         const osc = this.ctx.createOscillator();
@@ -78,7 +86,7 @@ class SoundManager {
 
     /** Final explosion pop */
     playExplode() {
-        if (!this.ctx) return;
+        if (!this._ready()) return;
         const t = this.ctx.currentTime;
 
         // Low thump
@@ -101,7 +109,7 @@ class SoundManager {
 
     /** Magic sparkle trail sound */
     playSparkle() {
-        if (!this.ctx) return;
+        if (!this._ready()) return;
         const t = this.ctx.currentTime;
         for (let i = 0; i < 3; i++) {
             const osc = this.ctx.createOscillator();
@@ -121,7 +129,7 @@ class SoundManager {
 
     /** Score point jingle */
     playScore() {
-        if (!this.ctx) return;
+        if (!this._ready()) return;
         const t = this.ctx.currentTime;
         const notes = [523, 659, 784]; // C5 E5 G5
         notes.forEach((freq, i) => {
@@ -167,7 +175,7 @@ class SoundManager {
      * Generates an endless loop of arpeggiated chords with a bassline and beat.
      */
     startMusic() {
-        if (!this.ctx || this.musicPlaying) return;
+        if (!this._ready() || this.musicPlaying) return;
         this.musicPlaying = true;
 
         // Chord progression: C - Am - F - G (loop)
